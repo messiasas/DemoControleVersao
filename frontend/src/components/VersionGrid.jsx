@@ -1,64 +1,114 @@
 import "../styles/grid.css";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { openVersionView } from "../utils/openVersionView.js";
 import { AgGridReact } from 'ag-grid-react';
 import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
-function AppNomeCell({ data }) {
-  const apps = data?.aplicacoes;
-
-  if (!apps || apps.length === 0) return <span>—</span>;
-
-  if (apps.length === 1) return <span>{apps[0].nome || "—"}</span>;
-
-  function handleVer() {
-    openVersionView(data);
-  }
-
-  return (
-    <button className="ver-apps-btn" onClick={handleVer}>
-      Ver ({apps.length})
-    </button>
-  );
-}
-
-function AppVersaoCell({ data }) {
-  const apps = data?.aplicacoes;
-
-  if (!apps || apps.length === 0) return <span>—</span>;
-
-  if (apps.length === 1) return <span>{apps[0].versao || "—"}</span>;
-
-  function handleVer() {
-    openVersionView(data);
-  }
-
-  return (
-    <button className="ver-apps-btn" onClick={handleVer}>
-      Ver ({apps.length})
-    </button>
-  );
-}
-
 const upper = (value) => (value == null ? value : String(value).toUpperCase());
 
-function ChaveCell({ data }) {
-  const chaves = data?.chaves;
+// Alturas usadas no cálculo da linha expandida — precisam bater com grid.css
+// (.expandable-cell.expanded, .expand-row-btn e .expandable-cell-list li).
+const ROW_HEIGHT = 35;
+const EXPANDED_BASE_HEIGHT = 46;
+const EXPANDED_ITEM_HEIGHT = 28;
 
-  if (!chaves || chaves.length === 0) return <span>—</span>;
+// Quantidade de linhas que a linha expandida precisa mostrar: a maior lista
+// entre aplicações e chaves (listas de 1 item não expandem).
+function expandedItemCount(data) {
+  const apps = data?.aplicacoes?.length || 0;
+  const chaves = data?.chaves?.length || 0;
+  return Math.max(apps > 1 ? apps : 0, chaves > 1 ? chaves : 0);
+}
 
-  if (chaves.length === 1) return <span>{upper(chaves[0].chave) || "—"}</span>;
+// Guarda os IDs das linhas expandidas. As células assinam o store com
+// useSyncExternalStore, então re-renderizam na hora do clique sem depender
+// do refreshCells da AG Grid (que não re-renderiza células React com as mesmas props).
+function createExpandedStore() {
+  const ids = new Set();
+  const listeners = new Set();
+  return {
+    has: (id) => ids.has(id),
+    toggle(id) {
+      if (ids.has(id)) ids.delete(id);
+      else ids.add(id);
+      listeners.forEach((l) => l());
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
 
-  function handleVer() {
-    openVersionView(data);
-  }
+// A AG Grid trata o clique na linha (seleção, onRowClicked) com listeners
+// nativos que rodam antes do onClick do React, então e.stopPropagation() não
+// adianta. Marcando o evento nativo no próprio botão, a grid o ignora.
+function ignoreInGrid(el) {
+  if (!el) return;
+  const marcar = (e) => { e.__ag_Grid_Stop_Propagation = true; };
+  el.addEventListener("pointerdown", marcar);
+  el.addEventListener("click", marcar);
+  return () => {
+    el.removeEventListener("pointerdown", marcar);
+    el.removeEventListener("click", marcar);
+  };
+}
+
+// Célula com lista: 1 item mostra direto; vários mostram o botão "Ver" e uma
+// seta que expande a linha dentro da própria tabela, listando todos os itens.
+// A expansão vale para a linha inteira (todas as colunas de lista juntas).
+function ListCell({ data, context, items, formatItem }) {
+  const { expandedStore, toggleExpanded } = context;
+  const expanded = useSyncExternalStore(
+    expandedStore.subscribe,
+    () => expandedStore.has(data?.id),
+  );
+
+  if (!items || items.length === 0) return <span>—</span>;
+
+  if (items.length === 1) return <span>{formatItem(items[0]) || "—"}</span>;
 
   return (
-    <button className="ver-apps-btn" onClick={handleVer}>
-      Ver ({chaves.length})
-    </button>
+    <div className={`expandable-cell${expanded ? " expanded" : ""}`}>
+      <div className="expandable-cell-actions">
+        <button
+          ref={ignoreInGrid}
+          type="button"
+          className="expand-row-btn"
+          title={expanded ? "Recolher" : "Expandir"}
+          aria-expanded={expanded}
+          onClick={() => toggleExpanded(data.id)}
+        >
+          {expanded ? "▾" : "▸"}
+        </button>
+        <button className="ver-apps-btn" onClick={() => openVersionView(data)}>
+          Ver ({items.length})
+        </button>
+      </div>
+      {expanded && (
+        <ul className="expandable-cell-list">
+          {items.map((item, i) => {
+            const texto = formatItem(item) || "—";
+            return <li key={i} title={texto}>{texto}</li>;
+          })}
+        </ul>
+      )}
+    </div>
   );
+}
+
+function AppNomeCell(props) {
+  return <ListCell {...props} items={props.data?.aplicacoes} formatItem={(a) => a.nome} />;
+}
+
+function AppVersaoCell(props) {
+  return <ListCell {...props} items={props.data?.aplicacoes} formatItem={(a) => a.versao} />;
+}
+
+function ChaveCell(props) {
+  return <ListCell {...props} items={props.data?.chaves} formatItem={(c) => upper(c.chave)} />;
 }
 
 const columns = [
@@ -158,12 +208,31 @@ function VersionGrid({ data, selectedRow, setSelectedRow, gridRef, theme = "tran
     ? "ag-theme-quartz ag-theme-quartz-amazonas"
     : "ag-theme-quartz";
 
+  const [expandedStore] = useState(createExpandedStore);
+  const apiRef = useRef(null);
+
+  const toggleExpanded = useCallback((id) => {
+    expandedStore.toggle(id);
+    // Recalcula as alturas pelo getRowHeight (cresce ao expandir, volta ao recolher).
+    apiRef.current?.resetRowHeights();
+  }, [expandedStore]);
+
+  const context = useMemo(() => ({ expandedStore, toggleExpanded }), [expandedStore, toggleExpanded]);
+
+  const getRowHeight = useCallback((params) => {
+    if (!params.data || !expandedStore.has(params.data.id)) return ROW_HEIGHT;
+    return EXPANDED_BASE_HEIGHT + expandedItemCount(params.data) * EXPANDED_ITEM_HEIGHT;
+  }, [expandedStore]);
+
   return (
     <div className={themeClass} style={{ height: 600, width: '100%' }}>
       <AgGridReact
         ref={gridRef}
         rowData={data}
         localeText={localeText}
+        context={context}
+        getRowHeight={getRowHeight}
+        onGridReady={(event) => { apiRef.current = event.api; }}
         columnDefs={columns}
         autoGroupColumnDef={autoGroupColumnDef}
         groupDisplayType="singleColumn"
