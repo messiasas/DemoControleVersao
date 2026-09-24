@@ -1,0 +1,3 @@
+Coloque aqui o dump.sql exportado do seu MySQL local.
+Ele só é executado na PRIMEIRA vez que o volume do banco é criado.
+Não faça commit deste arquivo no Git (contém seus dados).

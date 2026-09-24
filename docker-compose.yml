@@ -1,0 +1,48 @@
+services:
+  db:
+    image: mysql:8.4
+    container_name: cv-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASS}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS}
+    volumes:
+      - db_data:/var/lib/mysql                     # dados persistem mesmo se o container for removido
+      - ./db-init:/docker-entrypoint-initdb.d:ro   # .sql aqui roda SÓ na 1ª criação do banco
+    # Descomente para acessar o MySQL pelo Workbench a partir do próprio servidor:
+    # ports:
+    #   - "127.0.0.1:3307:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  backend:
+    build: ./backend
+    container_name: cv-backend
+    restart: unless-stopped
+    environment:
+      DB_HOST: db            # nome do serviço acima, não "localhost"
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASS}
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      db:
+        condition: service_healthy   # só sobe quando o MySQL estiver pronto
+
+  frontend:
+    build: ./frontend
+    container_name: cv-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80"            # acesse http://IP_DO_SERVIDOR:8080
+    depends_on:
+      - backend
+
+volumes:
+  db_data:
